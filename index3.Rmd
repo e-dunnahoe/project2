@@ -1,0 +1,241 @@
+---
+title: 'Project 2: Data Mining, Classification, Prediction'
+author: "SDS322E"
+date: ''
+output:
+  html_document:
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+  pdf_document:
+    toc: no
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, fig.align = "center", warning = F, message = F,
+tidy=TRUE, tidy.opts=list(width.cutoff=60), R.options=list(max.print=100))
+
+class_diag <- function(score, truth, positive, cutoff=.5){
+
+  pred <- factor(score>cutoff,levels=c("TRUE","FALSE"))
+  truth <- factor(truth==positive, levels=c("TRUE","FALSE"))
+
+  tab<-table(truth, pred)
+  acc=sum(diag(tab))/sum(tab)
+  sens=tab[1,1]/rowSums(tab)[1]
+  spec=tab[2,2]/rowSums(tab)[2]
+  ppv=tab[1,1]/colSums(tab)[1]
+
+#CALCULATE F1
+  f1=2*(sens*ppv)/(sens+ppv)
+  
+#CALCULATE EXACT AUC
+  truth<-as.numeric(truth=="TRUE")
+  ord<-order(score, decreasing=TRUE)
+  score <- score[ord]; truth <- truth[ord]
+  TPR=cumsum(truth)/max(1,sum(truth))
+  FPR=cumsum(!truth)/max(1,sum(!truth))
+  dup<-c(score[-1]>=score[-length(score)], FALSE)
+  TPR<-c(0,TPR[!dup],1); FPR<-c(0,FPR[!dup],1)
+  n <- length(TPR)
+  auc<- sum( ((TPR[-1]+TPR[-n])/2) * (FPR[-1]-FPR[-n]) )
+  round(data.frame(acc,sens,spec,ppv,f1,ba=(sens+spec)/2,auc, row.names = "Metrics"),4)
+}
+```
+
+# Mining, Classification, Prediction
+
+## Emily Dunnahoe ekd489
+
+### Introduction 
+
+Can you predict literally anything based on codon frequencies in an large sample of diverse organisms? This project will try. The data set that will be explored is from the UCI Machine Learning Repository. The Codon data set consists of Kingdom, speciesID, DNAtype, and Ncodons columns for attribute information, along 63 columns of---codons. The codon columns list its nucleotide bases as the header and its frequency of usage within that organisms genome. I chose this data set in particular because I make bad choices, including majoring in Genetics and Genomics.
+
+```{R}
+library(tidyverse)
+library(readr)
+codon <- read_csv("codon2.csv")
+
+codon %>% 
+  na.omit()->codon
+```
+
+### Cluster Analysis
+
+```{R}
+library(cluster)
+library(GGally)
+
+codon %>% slice(1:10000) %>% select(14,20,33,68)->valine_codon
+no_wammy<-valine_codon %>% pam(k=2)
+no_wammy
+val_clust<-valine_codon%>% mutate(cluster=as.factor(no_wammy$clustering))
+no_wammy$silinfo$avg.width
+valine_pam<-valine_codon %>% pam(k=2)
+val_clust<-valine_codon%>% mutate(cluster=as.factor(valine_pam$clustering))
+
+valine_pam$silinfo$avg.width
+library(GGally)
+ggpairs(val_clust,columns=1:4, aes(color=cluster))
+```
+
+Due to the size of my data set, I reduced the number of codon considered. Having performed PCA first (in a fit of rage), I chose what appeared to be the most disparate codons to examine. I took a slice ov ten thousand instances, selected for my chosen codons, and ran a PAM with k=3. I am only showing the result of k=2 to save space and sanity. I then created a column for listing the cluster to which it was assigned. I determined the average silhouette width using silinfo() where k was 2-14, and found that k=2 resulted in an average silhouette width of .578---the only one close to a reasonable structure for the data. I followed up with a ggpairs plot, behold. 
+
+As far a distributions are concerned, Cluster1 appears to have consistently larger frequencies for CUG, GGC, and GUC than Cluster. For Cluster2, the most interesting bit is the stop codon, UAA. If I am reading this correctly, (unlikely) then though there is a lower total number in Cluster2, when the other codons are considered the is an increase in a smattering of organisms?  
+    
+    
+### Dimensionality Reduction with PCA
+
+```{R}
+codon1<-codon %>% select(7:70)
+codon_nums<-codon1 %>% select_if(is.numeric) %>% scale
+codon_pca<-princomp(codon_nums)
+summary(codon_pca, loadings = T)
+
+eigval<-codon_pca$sdev^2
+varprop=round(eigval/sum(eigval), 2) 
+library(factoextra)
+fviz_pca_biplot(codon_pca, rownames=NULL)
+```
+
+For this PCA analysis, I used all available codons, then unnecessarily scaled them all, before running princomp(). I generated a summary of the results, which indicated that I should keep 15 components to cover roughly 80% of the data. A monster Rorschach biplot was created using the one that you told me to. I made the executive decision, that hopefully will not cost me too many point, to interpret the first 2 components rather than 15. The first PC is indicative of the overall strength of the component is describing the largest portion of data. In this case, the codons with negative values show that the widest range of data is low in the frequency of UUA, AUU, AUA, and GUA. Whereas Comp2
+
+###  Linear Classifier
+
+```{R}
+blah<-codon %>% select(9:72) %>% sample_n(1000)
+
+fit<- glm(domain ~ . , data=blah, family = "binomial")
+probs <- predict(fit, type="response")
+class_diag(probs, blah$domain, positive=1) 
+table(truth = blah$domain, predictions = probs>.5)
+```
+
+```{R}
+k=10 
+data<-blah[sample(nrow(blah)),] 
+folds<-cut(seq(1:nrow(blah)),breaks=k,labels=F) 
+
+diags<-NULL
+for(i in 1:k){
+  train<-data[folds!=i,]
+test<-data[folds==i,]
+truth<-test$domain
+
+fit<-glm(domain ~ . ,data=train,family="binomial")
+probs<-predict(fit,newdata = test,type="response")
+diags<-rbind(diags,class_diag(probs,truth, positive=1))
+}
+
+summarise_all(diags, mean)
+```
+
+The in-sample performance resulted in an AUC of 0.987, whereas the CV AUC came out to .995. This is indicative of overfitting.
+
+### Non-Parametric Classifier
+
+```{R}
+library(caret)
+fit <- knn3(domain ~ . , data=blah)
+probs <- predict(fit, newdata=blah)[,2] 
+class_diag(probs, blah$domain, positive="1") 
+table(truth = blah$domain, predictions = probs>.5)
+```
+
+```{R}
+k=10 
+data<-blah[sample(nrow(blah)),] 
+folds<-cut(seq(1:nrow(blah)),breaks=k,labels=F) 
+
+diags<-NULL
+for(i in 1:k){
+  train<-data[folds!=i,]
+test<-data[folds==i,]
+truth<-test$domain
+fit<-knn3(domain ~ . ,data=train)
+probs<-predict(fit,newdata = test)[,2]
+diags<-rbind(diags,class_diag(probs,truth, positive=1))
+}
+summarize_all(diags,mean)
+```
+The in-sample performance resulted in an AUC of 0.9494, whereas the CV AUC came out to .97188. 
+
+### Regression/Numeric Prediction
+
+```{R}
+install.packages('rpart.plot', dependencies=TRUE, repos='http://cran.rstudio.com/')
+library(rpart)
+library(rpart.plot)
+fit<- rpart(domain~., data=blah)
+rpart.plot(fit)
+```
+
+```{R}
+fit <- train(domain~., blah, method="rpart")
+fit$bestTune
+rpart.plot(fit$finalModel)
+
+```
+Please see the python section below for MSE values which were determined in python. I misunderstood the brief, thinking that we needed to do one of the problem using python. Have mercy. 
+### Python 
+
+```{R}
+library(reticulate)
+py_install("pandas")
+py_install("scikit-learn")
+```
+
+```{python}
+from sklearn.model_selection import cross_validate
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error
+import pandas as pd
+import numpy as np
+df = pd.read_csv('codon2.csv')
+np.random.seed(0)
+shuffler = np.random.permutation(np.arange(len(df), dtype = int).tolist())
+shuffled_df= df.iloc[shuffler,:]
+
+X = shuffled_df.iloc[:,50:-1]
+y = shuffled_df.iloc[:,8]
+
+print("Average target value: ", np.mean(y))
+
+reg_all = DecisionTreeRegressor(random_state=0, max_depth = 7)
+reg_all.fit(X,y)
+print("MSE across all data, when trained on all data: ", mean_squared_error(reg_all.predict(X), y))
+
+regressor_overfit = DecisionTreeRegressor(random_state=0, max_depth = 20)
+crossval_overfit = cross_validate(regressor_overfit, X, y, cv=5, scoring=('r2', 'neg_mean_squared_error'), return_train_score=True)
+avg_mse_train = np.mean(-crossval_overfit['train_neg_mean_squared_error'])
+avg_mse_test = np.mean(-crossval_overfit['test_neg_mean_squared_error'])
+print('Average MSE over CV (k=5) fold train sets (overfit): ', avg_mse_train)
+print('Average MSE over CV (k=5) fold test sets (overfit): ', avg_mse_test)
+
+regressor = DecisionTreeRegressor(random_state=0, max_depth = 7)
+crossval = cross_validate(regressor, X, y, cv=5, scoring=('r2', 'neg_mean_squared_error'), return_train_score=True)
+avg_mse_train = np.mean(-crossval['train_neg_mean_squared_error'])
+avg_mse_test = np.mean(-crossval['test_neg_mean_squared_error'])
+print('Average MSE over CV (k=5) fold train sets: ', avg_mse_train)
+print('Average MSE over CV (k=5) fold test sets: ', avg_mse_test)
+
+regressor_rf = RandomForestRegressor(random_state=0, max_depth = 7)
+crossval_rf = cross_validate(regressor_rf, X, y, cv=5, scoring=('r2', 'neg_mean_squared_error'), return_train_score=True)
+avg_mse_train = np.mean(-crossval_rf['train_neg_mean_squared_error'])
+avg_mse_test = np.mean(-crossval_rf['test_neg_mean_squared_error'])
+print('Average MSE over CV (k=5) fold train sets for random forest: ', avg_mse_train)
+print('Average MSE over CV (k=5) fold test sets for random forest: ', avg_mse_test)
+```
+
+Using the sklearn library in python I fit a decision tree regression model using about a third of the available codon frequencies, asking the model to predict the value of one of the other frequencies (UUC). The decision trees are very prone to overfitting, as I show by letting the max depth of the tree go to 20. In this case, the model's accuracy on the train folds is much higher than the accuracy on the test folds, indicating overfitting. If I limit the max depth to around 7 there is less overfitting. Given the average target codon frequency value of 0.2344, a MSE of around 4E-5 is not bad. I also fit a random forest regression model to the same data, and find that using the ensemble of decision trees (just using the 100 tree default value) does create a slightly more accurate model, without incurring any additional overfitting. It turns out all of it was unecessary.
+
+
+### Concluding Remarks
+
+
+
+
+
+
